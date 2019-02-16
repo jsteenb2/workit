@@ -15,6 +15,13 @@ func Ctx(ctx context.Context) QueueOptFn {
 	}
 }
 
+// BackoffPolicy sets a backoff policy for workers workfn when WorkFn return an error
+// and a retry loop is initiated.
+func BackoffPolicy(b BackoffOptFn) QueueOptFn {
+	return func(q *Queue) {
+		q.backoffPolicy = b
+	}
+}
 
 // Buffer sets the work stream to a buffered stream. If the buffered stream is
 // full, the Add call will be blocking until availability.
@@ -23,5 +30,3 @@ func Buffer(buffer int) QueueOptFn {
 		q.workStream = make(chan workDeets, buffer)
 	}
 }
-
-// TODO: add Retry policy

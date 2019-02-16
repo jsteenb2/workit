@@ -29,7 +29,8 @@ type workDeets struct {
 // Queue is a worker queue that orchestrates the workers to process all added messages.
 // It is thread safe to add more work to the worker queue.
 type Queue struct {
-	numWorkers int
+	numWorkers    int
+	backoffPolicy BackoffOptFn
 
 	cancelFn context.CancelFunc
 	doneChan <-chan struct{}
@@ -48,8 +49,10 @@ func New(numWorkers int, opts ...QueueOptFn) *Queue {
 	if numWorkers < 1 {
 		numWorkers = 1
 	}
+
 	q := &Queue{
-		numWorkers: numWorkers,
+		numWorkers:    numWorkers,
+		backoffPolicy: NewStopBackoff(),
 
 		cancelFn: cancel,
 		doneChan: newCtx.Done(),
@@ -65,9 +68,10 @@ func New(numWorkers int, opts ...QueueOptFn) *Queue {
 	return q
 }
 
+// Start kicks off the numWorker workers.
 func (q *Queue) Start() {
 	for i := 0; i < q.numWorkers; i++ {
-		newWorker(q.workerStream, q.doneChan).start()
+		newWorker(q.workerStream, q.doneChan, q.backoffPolicy).start()
 	}
 
 	go func() {
@@ -113,13 +117,15 @@ type worker struct {
 	work        chan workDeets
 	workerQueue chan chan workDeets
 	doneChan    <-chan struct{}
+	retryPolicy BackoffOptFn
 }
 
-func newWorker(queue chan chan workDeets, doneChan <-chan struct{}) *worker {
+func newWorker(queue chan chan workDeets, doneChan <-chan struct{}, backoff BackoffOptFn) *worker {
 	return &worker{
 		work:        make(chan workDeets),
 		workerQueue: queue,
 		doneChan:    doneChan,
+		retryPolicy: backoff,
 	}
 }
 
@@ -142,11 +148,8 @@ func (w *worker) start() {
 func (w *worker) do() {
 	select {
 	case deets := <-w.work:
-		err := deets.workFn()
-		if err == nil {
-			return
-		}
-		if deets.errFn == nil {
+		err := retry(w.doneChan, deets.workFn, w.retryPolicy)
+		if err == nil || deets.errFn == nil {
 			return
 		}
 		deets.errFn(err)

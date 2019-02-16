@@ -45,77 +45,36 @@ func TestQueue(t *testing.T) {
 		t.Run("unbuffered work stream", func(t *testing.T) {
 			tests := []struct {
 				name          string
-				workers       int
+				numWorkers    int
 				expectedCalls int
 			}{
 				{
 					name:          "1 worker 5 adds",
-					workers:       1,
+					numWorkers:    1,
 					expectedCalls: 5,
 				},
 				{
 					name:          "3 worker 15 adds",
-					workers:       3,
+					numWorkers:    3,
 					expectedCalls: 15,
 				},
 				{
 					name:          "5 worker 500 adds",
-					workers:       5,
+					numWorkers:    5,
 					expectedCalls: 500,
 				},
 				{
 					name:          "50 worker 50000 adds",
-					workers:       50,
+					numWorkers:    50,
 					expectedCalls: 50000,
 				},
 			}
 			for _, tt := range tests {
-				fn := func(t *testing.T) {
-					faker := newFakeFn()
-
-					queue := workit.New(tt.workers)
-					queue.Start()
-
-					called := make(chan struct{}, tt.expectedCalls)
-					for i := 0; i < tt.expectedCalls; i++ {
-						queue.Add(func() error {
-							faker.incr()
-							called <- struct{}{}
-							return nil
-						}, nil)
-					}
-
-					getsCalled(t, called, tt.expectedCalls)
-
-					queue.Close()
-					finishes(t, queue, 0)
-				}
-				t.Run("no error func/"+tt.name, fn)
+				t.Run("no error func/"+tt.name, testQueueNoErrFn(tt.numWorkers, tt.expectedCalls))
 			}
 
 			for _, tt := range tests {
-				fn := func(t *testing.T) {
-					faker := newFakeFn()
-
-					queue := workit.New(tt.workers)
-					queue.Start()
-
-					called := make(chan struct{}, tt.expectedCalls)
-					for i := 0; i < tt.expectedCalls; i++ {
-						queue.Add(func() error {
-							return errors.New("an error")
-						}, func(e error) {
-							faker.incr()
-							called <- struct{}{}
-						})
-					}
-
-					getsCalled(t, called, tt.expectedCalls)
-
-					queue.Close()
-					finishes(t, queue, 0)
-				}
-				t.Run("has error func/"+tt.name, fn)
+				t.Run("has error func/"+tt.name, testQueueNoErrFn(tt.numWorkers, tt.expectedCalls))
 			}
 		})
 
@@ -152,55 +111,118 @@ func TestQueue(t *testing.T) {
 				},
 			}
 			for _, tt := range tests {
-				fn := func(t *testing.T) {
-					faker := newFakeFn()
+				t.Run("no error func/"+tt.name, testQueueNoErrFn(tt.workers, tt.expectedCalls, workit.Buffer(tt.buffer)))
+			}
 
-					queue := workit.New(tt.workers, workit.Buffer(tt.buffer))
-					queue.Start()
+			for _, tt := range tests {
+				t.Run("has error func/"+tt.name, testQueueWithErrFn(tt.workers, tt.expectedCalls, workit.Buffer(tt.buffer)))
+			}
+		})
 
-					called := make(chan struct{}, tt.expectedCalls)
-					for i := 0; i < tt.expectedCalls; i++ {
-						queue.Add(func() error {
-							faker.incr()
-							called <- struct{}{}
-							return nil
-						}, nil)
-					}
-
-					getsCalled(t, called, tt.expectedCalls)
-
-					queue.Close()
-					finishes(t, queue, 0)
-				}
-				t.Run("no error func/"+tt.name, fn)
+		t.Run("with backoffPolicy policy", func(t *testing.T) {
+			tests := []struct {
+				name          string
+				backoffPolicy workit.BackoffOptFn
+			}{
+				{
+					name:          "zero",
+					backoffPolicy: workit.NewZeroBackoff(10),
+				},
+				{
+					name:          "exponential",
+					backoffPolicy: workit.NewExponentialBackoff(0, time.Millisecond, 10),
+				},
+				{
+					name:          "simple",
+					backoffPolicy: workit.NewSimpleBackoff(10, false, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+				},
+				{
+					name:          "constant",
+					backoffPolicy: workit.NewConstantBackoff(time.Nanosecond, 10),
+				},
 			}
 
 			for _, tt := range tests {
 				fn := func(t *testing.T) {
 					faker := newFakeFn()
 
-					queue := workit.New(tt.workers, workit.Buffer(tt.buffer))
+					queue := workit.New(1, workit.BackoffPolicy(tt.backoffPolicy))
 					queue.Start()
 
-					called := make(chan struct{}, tt.expectedCalls)
-					for i := 0; i < tt.expectedCalls; i++ {
-						queue.Add(func() error {
-							return errors.New("an error")
-						}, func(e error) {
-							faker.incr()
-							called <- struct{}{}
-						})
-					}
+					called := make(chan struct{}, 1)
+					queue.Add(func() error {
+						faker.incr()
+						return errors.New("an error")
+					}, func(e error) {
+						faker.incr()
+						called <- struct{}{}
+					})
 
-					getsCalled(t, called, tt.expectedCalls)
+					getsCalled(t, called, 1)
+					if count := faker.callCount(); count != 11 {
+						t.Errorf("wrong call count: expected=%d got=%d", 11, count)
+					}
 
 					queue.Close()
 					finishes(t, queue, 0)
 				}
-				t.Run("has error func/"+tt.name, fn)
+				t.Run(tt.name, fn)
 			}
 		})
 	})
+}
+
+func testQueueNoErrFn(numWorkers, expectedCalls int, opts ...workit.QueueOptFn) func(t *testing.T) {
+	return func(t *testing.T) {
+		faker := newFakeFn()
+
+		queue := workit.New(numWorkers, opts...)
+		queue.Start()
+
+		called := make(chan struct{}, expectedCalls)
+		for i := 0; i < expectedCalls; i++ {
+			queue.Add(func() error {
+				faker.incr()
+				called <- struct{}{}
+				return nil
+			}, nil)
+		}
+
+		getsCalled(t, called, expectedCalls)
+		if count := faker.callCount(); expectedCalls != count {
+			t.Errorf("unexpected call count: expected=%d got%d", expectedCalls, count)
+		}
+
+		queue.Close()
+		finishes(t, queue, 0)
+	}
+}
+
+func testQueueWithErrFn(numWorkers, expectedCalls int, opts ...workit.QueueOptFn) func(t *testing.T) {
+	return func(t *testing.T) {
+
+		queue := workit.New(numWorkers, opts...)
+		queue.Start()
+
+		faker := newFakeFn()
+		called := make(chan struct{}, expectedCalls)
+		for i := 0; i < expectedCalls; i++ {
+			queue.Add(func() error {
+				return errors.New("an error")
+			}, func(e error) {
+				faker.incr()
+				called <- struct{}{}
+			})
+		}
+
+		getsCalled(t, called, expectedCalls)
+		if count := faker.callCount(); expectedCalls != count {
+			t.Errorf("unexpected call count: expected=%d got%d", expectedCalls, count)
+		}
+
+		queue.Close()
+		finishes(t, queue, 0)
+	}
 }
 
 func ExampleQueue() {
@@ -334,7 +356,7 @@ func getsCalled(t *testing.T, calledChan <-chan struct{}, expectedCount int) {
 
 func isFinished(q *workit.Queue, expectedDepth int) error {
 	var lastDepth int
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 500; i++ {
 		lastDepth = q.Depth()
 		if lastDepth == expectedDepth {
 			return nil
