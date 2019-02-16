@@ -144,24 +144,18 @@ func TestQueue(t *testing.T) {
 
 			for _, tt := range tests {
 				fn := func(t *testing.T) {
-					faker := newFakeFn()
-
 					queue := workit.New(1, workit.BackoffPolicy(tt.backoffPolicy))
 					queue.Start()
 
-					called := make(chan struct{}, 1)
+					var count int64
 					queue.Add(func() error {
-						faker.incr()
+						atomic.AddInt64(&count, 1)
 						return errors.New("an error")
 					}, func(e error) {
-						faker.incr()
-						called <- struct{}{}
+						atomic.AddInt64(&count, 1)
 					})
 
-					getsCalled(t, called, 1)
-					if count := faker.callCount(); count != 11 {
-						t.Errorf("wrong call count: expected=%d got=%d", 11, count)
-					}
+					getsCount(t, &count, 11)
 
 					queue.Close()
 					finishes(t, queue, 0)
@@ -174,24 +168,18 @@ func TestQueue(t *testing.T) {
 
 func testQueueNoErrFn(numWorkers, expectedCalls int, opts ...workit.QueueOptFn) func(t *testing.T) {
 	return func(t *testing.T) {
-		faker := newFakeFn()
-
 		queue := workit.New(numWorkers, opts...)
 		queue.Start()
 
-		called := make(chan struct{}, expectedCalls)
+		var count int64
 		for i := 0; i < expectedCalls; i++ {
 			queue.Add(func() error {
-				faker.incr()
-				called <- struct{}{}
+				atomic.AddInt64(&count, 1)
 				return nil
 			}, nil)
 		}
 
-		getsCalled(t, called, expectedCalls)
-		if count := faker.callCount(); expectedCalls != count {
-			t.Errorf("unexpected call count: expected=%d got%d", expectedCalls, count)
-		}
+		getsCount(t, &count, expectedCalls)
 
 		queue.Close()
 		finishes(t, queue, 0)
@@ -204,21 +192,16 @@ func testQueueWithErrFn(numWorkers, expectedCalls int, opts ...workit.QueueOptFn
 		queue := workit.New(numWorkers, opts...)
 		queue.Start()
 
-		faker := newFakeFn()
-		called := make(chan struct{}, expectedCalls)
+		var count int64
 		for i := 0; i < expectedCalls; i++ {
 			queue.Add(func() error {
 				return errors.New("an error")
 			}, func(e error) {
-				faker.incr()
-				called <- struct{}{}
+				atomic.AddInt64(&count, 1)
 			})
 		}
 
-		getsCalled(t, called, expectedCalls)
-		if count := faker.callCount(); expectedCalls != count {
-			t.Errorf("unexpected call count: expected=%d got%d", expectedCalls, count)
-		}
+		getsCount(t, &count, expectedCalls)
 
 		queue.Close()
 		finishes(t, queue, 0)
@@ -226,22 +209,19 @@ func testQueueWithErrFn(numWorkers, expectedCalls int, opts ...workit.QueueOptFn
 }
 
 func ExampleQueue() {
-	faker := newFakeFn()
-
 	queue := workit.New(3)
 	queue.Start()
 
+	var count int64
 	expectedCalls := 100
-	called := make(chan struct{}, expectedCalls)
 	for i := 0; i < expectedCalls; i++ {
 		queue.Add(func() error {
-			faker.incr()
-			called <- struct{}{}
+			atomic.AddInt64(&count, 1)
 			return nil
 		}, nil)
 	}
 
-	err := isCalled(called, expectedCalls)
+	err := isCount(&count, expectedCalls)
 	fmt.Println(err)
 
 	queue.Close()
@@ -253,23 +233,20 @@ func ExampleQueue() {
 }
 
 func ExampleQueue_Add() {
-	faker := newFakeFn()
-
 	queue := workit.New(3)
 	queue.Start()
 
+	var count int64
 	expectedCalls := 3
-	called := make(chan struct{}, expectedCalls)
 	for i := 0; i < expectedCalls; i++ {
 		queue.Add(func() error {
 			return errors.New("an error")
 		}, func(e error) {
-			faker.incr()
-			called <- struct{}{}
+			atomic.AddInt64(&count, 1)
 		})
 	}
 
-	err := isCalled(called, expectedCalls)
+	err := isCount(&count, expectedCalls)
 	fmt.Println(err)
 
 	queue.Close()
@@ -281,23 +258,20 @@ func ExampleQueue_Add() {
 }
 
 func ExampleQueue_Add_WithErrStream() {
-	faker := newFakeFn()
-
 	queue := workit.New(3)
 	queue.Start()
 
+	var count int64
 	expectedCalls := 3
 	errStream := make(chan error, expectedCalls)
-	called := make(chan struct{}, expectedCalls)
 	for i := 0; i < expectedCalls; i++ {
 		queue.Add(func() error {
-			faker.incr()
-			called <- struct{}{}
+			atomic.AddInt64(&count, 1)
 			return errors.New("an error")
 		}, workit.ErrStream(errStream))
 	}
 
-	err := isCalled(called, expectedCalls)
+	err := isCount(&count, expectedCalls)
 	fmt.Println(err)
 
 	for i := 0; i < expectedCalls; i++ {
@@ -308,7 +282,7 @@ func ExampleQueue_Add_WithErrStream() {
 	queue.Close()
 	err = isFinished(queue, 0)
 	fmt.Println(err)
-	fmt.Println(faker.callCount())
+	fmt.Println(count)
 	// Output:
 	// <nil>
 	// an error
@@ -318,38 +292,19 @@ func ExampleQueue_Add_WithErrStream() {
 	// 3
 }
 
-type fakeFn struct {
-	calls *int64
-}
-
-func newFakeFn() *fakeFn {
-	var init int64
-	return &fakeFn{
-		calls: &init,
-	}
-}
-
-func (f *fakeFn) incr() {
-	atomic.AddInt64(f.calls, 1)
-}
-
-func (f *fakeFn) callCount() (i int) {
-	return int(*f.calls)
-}
-
-func isCalled(calledChan <-chan struct{}, expectedCount int) error {
-	for i := 0; i < expectedCount; i++ {
-		select {
-		case <-calledChan:
-		case <-time.After(100 * time.Millisecond):
-			return errors.New("call not made in time")
+func isCount(count *int64, expectedCount int) error {
+	for i := 0; i < 500; i++ {
+		if int(*count) == expectedCount {
+			return nil
 		}
+		time.Sleep(time.Duration(i) * time.Millisecond)
 	}
-	return nil
+	return fmt.Errorf("count did not match: expected=%d got=%d", expectedCount, *count)
 }
 
-func getsCalled(t *testing.T, calledChan <-chan struct{}, expectedCount int) {
-	if err := isCalled(calledChan, expectedCount); err != nil {
+func getsCount(t *testing.T, count *int64, expectedCount int) {
+	err := isCount(count, expectedCount)
+	if err != nil {
 		t.Fatal(err)
 	}
 }
